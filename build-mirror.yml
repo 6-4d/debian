@@ -1,0 +1,67 @@
+# Builds a small package mirror (the "repo" folder) next to index.html.
+# The browser console installs its starter packages from it, with no proxy and no sign-in.
+#
+# Put this file in your repo at:  .github/workflows/build-mirror.yml
+# Then: Actions tab -> "Build package mirror" -> Run workflow. Takes a few minutes.
+# To change the package list, edit MIRROR_PACKAGES below and run it again.
+
+name: Build package mirror
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Everything here becomes available to "apt install" inside the console.
+  # (The starter set that is installed automatically on first start is the first line.)
+  MIRROR_PACKAGES: >-
+    sudo nano tmux htop tree less unzip zip jq neofetch file ncdu bc sqlite3 mc
+    figlet cowsay fortune-mod fortunes-min sl cmatrix curl wget git ca-certificates
+    vim lynx w3m screen zsh fish nethack-console bsdgames
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packages inside a Debian 10 (i386) container
+        run: |
+          rm -rf repo
+          mkdir repo
+          cat > /tmp/build.sh <<'EOF'
+          set -eu
+          cat > /etc/apt/sources.list <<'LIST'
+          deb http://archive.debian.org/debian buster main
+          deb http://archive.debian.org/debian-security buster/updates main
+          LIST
+          printf 'Acquire::Check-Valid-Until "false";\nAcquire::AllowReleaseInfoChange "true";\n' > /etc/apt/apt.conf.d/99archive
+          apt-get update
+          ok=""
+          for p in $MIRROR_PACKAGES; do
+            if apt-cache show "$p" >/dev/null 2>&1; then ok="$ok $p"; else echo "skipping unknown package: $p"; fi
+          done
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only --no-install-recommends $ok
+          cp /var/cache/apt/archives/*.deb /out/
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dpkg-dev apt-utils
+          cd /out
+          dpkg-scanpackages -m . /dev/null > Packages
+          gzip -9 -k -f Packages
+          apt-ftparchive release . > Release
+          ls -la /out
+          du -sh /out
+          EOF
+          docker run --rm --platform linux/386 \
+            -e MIRROR_PACKAGES="$MIRROR_PACKAGES" \
+            -v "$PWD/repo:/out" -v /tmp/build.sh:/build.sh \
+            i386/debian:buster bash /build.sh
+
+      - name: Publish the mirror
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A repo
+          git commit -m "Update package mirror" || echo "Nothing changed"
+          git push
